@@ -2,6 +2,7 @@ import time
 import collections
 import sys
 import traceback
+import re
 
 from functools import partial
 # TODO add in requirements.txt
@@ -112,7 +113,6 @@ class TestMaterializedViews(Tester):
                        "updates. Setting gc_grace_seconds too low might cause undelivered updates"
                        " to expire before being replayed.")
 
-
     def insert_test(self):
         """Test basic insertions"""
 
@@ -217,13 +217,13 @@ class TestMaterializedViews(Tester):
                          "username IS NOT NULL PRIMARY KEY (birth_year, username)"))
 
         result = session.execute(("SELECT * FROM system_schema.materialized_views "
-                                 "WHERE keyspace_name='ks' AND table_name='users'"))
+                                  "WHERE keyspace_name='ks' AND table_name='users'"))
         self.assertEqual(len(result), 2, "Expecting {} materialized view, got {}".format(2, len(result)))
 
         session.execute("DROP MATERIALIZED VIEW ks.users_by_state;")
 
         result = session.execute(("SELECT * FROM system_schema.materialized_views "
-                                 "WHERE keyspace_name='ks' AND table_name='users'"))
+                                  "WHERE keyspace_name='ks' AND table_name='users'"))
         self.assertEqual(len(result), 1, "Expecting {} materialized view, got {}".format(1, len(result)))
 
     def drop_column_test(self):
@@ -232,7 +232,7 @@ class TestMaterializedViews(Tester):
         session = self.prepare(user_table=True)
 
         result = session.execute(("SELECT * FROM system_schema.materialized_views "
-                                 "WHERE keyspace_name='ks' AND table_name='users'"))
+                                  "WHERE keyspace_name='ks' AND table_name='users'"))
         self.assertEqual(len(result), 1, "Expecting {} materialized view, got {}".format(1, len(result)))
 
         assert_invalid(
@@ -247,7 +247,7 @@ class TestMaterializedViews(Tester):
         session = self.prepare(user_table=True)
 
         result = session.execute(("SELECT * FROM system_schema.materialized_views "
-                                 "WHERE keyspace_name='ks' AND table_name='users'"))
+                                  "WHERE keyspace_name='ks' AND table_name='users'"))
         self.assertEqual(
             len(result), 1,
             "Expecting {} materialized view, got {}".format(1, len(result))
@@ -531,7 +531,7 @@ class TestMaterializedViews(Tester):
 
         debug("Tyring to UpInsert data with a different value using IF NOT EXISTS")
         for i in xrange(1000):
-            v = i*2
+            v = i * 2
             session.execute(
                 "INSERT INTO t (id, v, v2, v3) VALUES ({id}, {v}, 'a', 3.0) IF NOT EXISTS".format(id=i, v=v)
             )
@@ -547,7 +547,7 @@ class TestMaterializedViews(Tester):
 
         debug("Update the 10 first rows with a different value")
         for i in xrange(1000):
-            v = i+2000
+            v = i + 2000
             session.execute(
                 "UPDATE t SET v={v} WHERE id = {id} IF v < 10".format(id=i, v=v)
             )
@@ -557,7 +557,7 @@ class TestMaterializedViews(Tester):
         results = session.execute("SELECT * FROM t_by_v;")
         self.assertEqual(len(results), 1000)
         for i in xrange(1000):
-            v = i+2000 if i < 10 else i
+            v = i + 2000 if i < 10 else i
             assert_one(
                 session,
                 "SELECT * FROM t_by_v WHERE v = {}".format(v),
@@ -566,7 +566,7 @@ class TestMaterializedViews(Tester):
 
         debug("Deleting the first 10 rows")
         for i in xrange(1000):
-            v = i+2000
+            v = i + 2000
             session.execute(
                 "DELETE FROM t WHERE id = {id} IF v = {v} ".format(id=i, v=v)
             )
@@ -621,7 +621,7 @@ class TestMaterializedViews(Tester):
                 debug("MV build process is finished")
                 break
 
-            elapsed = (time.time()-start)/60
+            elapsed = (time.time() - start) / 60
             if elapsed > 2:
                 break
 
@@ -637,6 +637,93 @@ class TestMaterializedViews(Tester):
                 [i, i, 'a', 3.0],
                 cl=ConsistencyLevel.ALL
             )
+
+    def view_tombstone_test(self):
+        """
+        Test that a materialized views properly tombstone
+        """
+
+        self.prepare(rf=3, options={'hinted_handoff_enabled': False})
+        node1, node2, node3 = self.cluster.nodelist()
+
+        session = self.patient_exclusive_cql_connection(node1)
+        session.max_trace_wait = 120
+        session.execute('USE ks')
+
+        session.execute("CREATE TABLE t (id int PRIMARY KEY, v int, v2 text, v3 decimal)")
+        session.execute(("CREATE MATERIALIZED VIEW t_by_v AS SELECT * FROM t "
+                         "WHERE v IS NOT NULL AND id IS NOT NULL PRIMARY KEY (v,id)"))
+
+        session.cluster.control_connection.wait_for_schema_agreement()
+
+        # Set initial values TS=0, verify
+        session.execute(SimpleStatement("INSERT INTO t (id, v, v2, v3) VALUES (1, 1, 'a', 3.0) USING TIMESTAMP 0",
+                                        consistency_level=ConsistencyLevel.ALL))
+
+        assert_one(
+            session,
+            "SELECT * FROM t_by_v WHERE v = 1",
+            [1, 1, 'a', 3.0]
+        )
+
+        # change v's value and TS=3, tombstones v=1 and adds v=0 record
+        session.execute(SimpleStatement("UPDATE t USING TIMESTAMP 3 SET v = 0 WHERE id = 1",
+                                        consistency_level=ConsistencyLevel.ALL))
+
+        assert_none(session, "SELECT * FROM t_by_v WHERE v = 1")
+
+        debug('Shutdown node2')
+        node2.stop(wait_other_notice=True)
+
+        session.execute("UPDATE t USING TIMESTAMP 4 SET v = 1 WHERE id = 1")
+
+        assert_one(
+            session,
+            "SELECT * FROM t_by_v WHERE v = 1",
+            [1, 1, 'a', 3.0]
+        )
+
+        node2.start(wait_other_notice=True, wait_for_binary_proto=True)
+
+        # We should get a digest mismatch
+        query = SimpleStatement("SELECT * FROM t_by_v WHERE v = 1",
+                                consistency_level=ConsistencyLevel.ALL)
+
+        result = session.execute(query, trace=True)
+        self.check_trace_events(query.trace, True)
+
+        # We should not get a digest mismatch the second time
+        query = SimpleStatement("SELECT * FROM t_by_v WHERE v = 1", consistency_level=ConsistencyLevel.ALL)
+
+        result = session.execute(query, trace=True)
+        self.check_trace_events(query.trace, False)
+
+        # Verify values one last time
+        assert_one(
+            session,
+            "SELECT * FROM t_by_v WHERE v = 1",
+            [1, 1, 'a', 3.0],
+            cl=ConsistencyLevel.ALL
+        )
+
+    def check_trace_events(self, trace, expect_digest):
+        # we should see multiple requests get enqueued prior to index scan
+        # execution happening
+
+        # Look for messages like:
+        #         Digest mismatch: org.apache.cassandra.service.DigestMismatchException: Mismatch for key DecoratedKey
+        regex = r"Digest mismatch: org.apache.cassandra.service.DigestMismatchException: Mismatch for key DecoratedKey"
+        for event in trace.events:
+            desc = event.description
+            match = re.match(regex, desc)
+            if match:
+                if expect_digest:
+                    break
+                else:
+                    self.fail("Encountered digest mismatch when we shouldn't")
+        else:
+            if expect_digest:
+                self.fail("Didn't find digest mismatch")
 
     def simple_repair_test(self):
         """
@@ -812,11 +899,11 @@ class TestMaterializedViews(Tester):
         debug('Write new data in node2 and node3 that overlap those in node1, node4 and node5')
         for i in xrange(1000):
             # we write i*2 as value, instead of i
-            session2.execute("INSERT INTO ks.t (id, v, v2, v3) VALUES ({v}, {v}, 'a', 3.0)".format(v=i*2))
+            session2.execute("INSERT INTO ks.t (id, v, v2, v3) VALUES ({v}, {v}, 'a', 3.0)".format(v=i * 2))
 
         debug('Verify the new data in the MV on node2 with CL=ONE')
         for i in xrange(1000):
-            v = i*2
+            v = i * 2
             assert_one(
                 session2,
                 "SELECT * FROM ks.t_by_v WHERE v = {}".format(v),
@@ -847,7 +934,7 @@ class TestMaterializedViews(Tester):
 
         debug('Read data from MV at quorum (new data should be returned after repair)')
         for i in xrange(1000):
-            v = i*2
+            v = i * 2
             assert_one(
                 session,
                 "SELECT * FROM ks.t_by_v WHERE v = {}".format(v),
@@ -958,6 +1045,7 @@ class MM(object):
 
 
 class Match(MM):
+
     def __init__(self):
         self.mp = MutationPresence.match
 
@@ -994,6 +1082,7 @@ class Missing(MM):
 
 
 class Excluded(MM):
+
     def __init__(self):
         self.mp = MutationPresence.excluded
 
@@ -1002,6 +1091,7 @@ class Excluded(MM):
 
 
 class Unknown(MM):
+
     def __init__(self):
         self.mp = MutationPresence.unknown
 
@@ -1015,7 +1105,7 @@ SimpleRow = collections.namedtuple('SimpleRow', 'a b c d')
 
 
 def row_generate(i):
-    return SimpleRow(a=i % 20, b=(i % 400)/20, c=i, d=i)
+    return SimpleRow(a=i % 20, b=(i % 400) / 20, c=i, d=i)
 
 
 # Create a threaded session and execute queries from a Queue
@@ -1048,7 +1138,7 @@ def thread_session(ip, queue, start, end, rows):
         for i in range(start, end):
             ret = execute_query(session, select_gi, i)
             queue.put_nowait(ret)
-    except Exception, e:
+    except Exception as e:
         print str(e)
         queue.close()
 
