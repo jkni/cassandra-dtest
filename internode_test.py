@@ -13,7 +13,7 @@ class TestInternode(Tester):
 
     def crash_during_decommission_test(self):
         """
-        If a node crashes whilst another node is being decomissioned,
+        If a node crashes whilst another node is being decommissioned,
         upon restarting the crashed node should not have invalid entries
         for the decomissioned node
         @jira_ticket CASSANDRA-10231
@@ -22,9 +22,7 @@ class TestInternode(Tester):
         cluster.populate(3).start(wait_other_notice=True)
 
         node1, node2 = cluster.nodelist()[0:2]
-        session = self.patient_exclusive_cql_connection(node2)
 
-        mark = node1.mark_log()
         t = DecomissionInParallel(node1)
         t.start()
 
