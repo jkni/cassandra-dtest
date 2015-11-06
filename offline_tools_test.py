@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import time
 
 from ccmlib import common
 from dtest import Tester, debug
@@ -188,17 +189,21 @@ class TestOfflineTools(Tester):
         self.assertEqual(rc, 0, msg=str(rc))
 
         # Generate multiple sstables and test works properly in the simple case
-        node1.stress(['write', 'n=1M', '-schema', 'replication(factor=3)'])
+        node1.stress(['write', 'n=100K', '-schema', 'replication(factor=3)'])
         node1.flush()
-        node1.stress(['write', 'n=1M', '-schema', 'replication(factor=3)'])
+        node1.stress(['write', 'n=100K', '-schema', 'replication(factor=3)'])
         node1.flush()
         cluster.stop(gently=False)
         (out, error, rc) = node1.run_sstableverify("keyspace1", "standard1", output=True)
 
         self.assertEqual(rc, 0, msg=str(rc))
-
-        outlines = out.split("\n")
-
+        debug(out)
+        debug(repr(out))
+        def normalize_paths_in_sstableverify_output(line):
+            return re.sub("(?<=path=').*(?=')", lambda match: os.path.normcase(match.group(0)), line)
+        outlines = map(normalize_paths_in_sstableverify_output, out.splitlines())
+        debug(outlines)
+        
         # check output is correct for each sstable
         sstables = self._get_final_sstables(node1, "keyspace1", "standard1")
 
@@ -206,6 +211,7 @@ class TestOfflineTools(Tester):
             verified = False
             hashcomputed = False
             for line in outlines:
+                debug(line)
                 if sstable in line:
                     if "Verifying BigTableReader" in line:
                         verified = True
@@ -228,6 +234,10 @@ class TestOfflineTools(Tester):
 
         # use verbose to get some coverage on it
         (out, error, rc) = node1.run_sstableverify("keyspace1", "standard1", options=['-v'], output=True)
+
+        debug(out)
+        debug(error)
+        debug(rc)
 
         if self.cluster.version() < '3.0':
             self.assertIn("java.lang.Exception: Invalid SSTable", error)
@@ -255,20 +265,23 @@ class TestOfflineTools(Tester):
     def _get_final_sstables(self, node, ks, table):
         """
         Return the node final sstable data files, excluding the temporary tables.
-        If sstablelister exists (>= 3.0) then we rely on this tool since the table
+        If sstableutil exists (>= 3.0) then we rely on this tool since the table
         file names no longer contain tmp in their names (CASSANDRA-7066).
         """
         # Get all sstable data files
-        allsstables = node.get_sstables(ks, table)
+        allsstables = map(os.path.normcase, node.get_sstables(ks, table))
+        debug(allsstables)
 
         # Remove any temporary files
-        tool_bin = node.get_tool('sstablelister')
+        tool_bin = node.get_tool('sstableutil')
         if os.path.isfile(tool_bin):
             args = [tool_bin, '--type', 'tmp', ks, table]
             env = common.make_cassandra_env(node.get_install_cassandra_root(), node.get_node_cassandra_root())
             p = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            (stdin, stderr) = p.communicate()
-            tmpsstables = stdin.split('\n')
+            (stdout, stderr) = p.communicate()
+            debug(repr(stdout))
+            tmpsstables = map(os.path.normcase, stdout.splitlines())
+            debug(tmpsstables)
             ret = list(set(allsstables) - set(tmpsstables))
         else:
             ret = [sstable for sstable in allsstables if "tmp" not in sstable[50:]]
