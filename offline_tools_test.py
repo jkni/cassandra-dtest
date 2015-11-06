@@ -2,7 +2,6 @@ import os
 import random
 import re
 import subprocess
-import time
 
 from ccmlib import common
 from dtest import Tester, debug
@@ -198,14 +197,11 @@ class TestOfflineTools(Tester):
         (out, error, rc) = node1.run_sstableverify("keyspace1", "standard1", output=True)
 
         self.assertEqual(rc, 0, msg=str(rc))
-        debug(out)
-        debug(repr(out))
 
         outlines = map(lambda line: re.sub("(?<=path=').*(?=')",
                                            lambda match: os.path.normcase(match.group(0)),
                                            line),
                        out.splitlines())
-        debug(outlines)
 
         # check output is correct for each sstable
         sstables = self._get_final_sstables(node1, "keyspace1", "standard1")
@@ -214,7 +210,6 @@ class TestOfflineTools(Tester):
             verified = False
             hashcomputed = False
             for line in outlines:
-                debug(line)
                 if sstable in line:
                     if "Verifying BigTableReader" in line:
                         verified = True
@@ -241,10 +236,6 @@ class TestOfflineTools(Tester):
         (out, error, rc) = node1.run_sstableverify("keyspace1", "standard1", options=['-v'], output=True)
 
         error = re.sub("(?<=Corrupted: ).*", lambda match: os.path.normcase(match.group(0)), error)
-
-        debug(out)
-        debug(error)
-        debug(rc)
 
         if self.cluster.version() < '3.0':
             self.assertIn("java.lang.Exception: Invalid SSTable", error)
@@ -277,7 +268,6 @@ class TestOfflineTools(Tester):
         """
         # Get all sstable data files
         allsstables = map(os.path.normcase, node.get_sstables(ks, table))
-        debug(allsstables)
 
         # Remove any temporary files
         tool_bin = node.get_tool('sstableutil')
@@ -286,9 +276,7 @@ class TestOfflineTools(Tester):
             env = common.make_cassandra_env(node.get_install_cassandra_root(), node.get_node_cassandra_root())
             p = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             (stdout, stderr) = p.communicate()
-            debug(repr(stdout))
             tmpsstables = map(os.path.normcase, stdout.splitlines())
-            debug(tmpsstables)
             ret = list(set(allsstables) - set(tmpsstables))
         else:
             ret = [sstable for sstable in allsstables if "tmp" not in sstable[50:]]
