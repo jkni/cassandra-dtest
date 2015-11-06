@@ -200,13 +200,13 @@ class TestOfflineTools(Tester):
         self.assertEqual(rc, 0, msg=str(rc))
         debug(out)
         debug(repr(out))
- 
+
         outlines = map(lambda line: re.sub("(?<=path=').*(?=')",
                                            lambda match: os.path.normcase(match.group(0)),
                                            line),
                        out.splitlines())
         debug(outlines)
-        
+
         # check output is correct for each sstable
         sstables = self._get_final_sstables(node1, "keyspace1", "standard1")
 
@@ -234,14 +234,14 @@ class TestOfflineTools(Tester):
             sstabledata = bytearray(f.read())
         with open(sstable1, 'w') as out:
             position = random.randrange(0, len(sstabledata))
-            sstabledata[position] = sstable[(position+random.randrange(1,256))%256]
+            sstabledata[position] = (sstabledata[position]+1)%256
             out.write(sstabledata)
 
         # use verbose to get some coverage on it
         (out, error, rc) = node1.run_sstableverify("keyspace1", "standard1", options=['-v'], output=True)
 
         error = re.sub("(?<=Corrupted: ).*", lambda match: os.path.normcase(match.group(0)), error)
-        
+
         debug(out)
         debug(error)
         debug(rc)
