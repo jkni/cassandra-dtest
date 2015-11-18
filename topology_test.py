@@ -1,5 +1,5 @@
 from dtest import Tester
-from tools import insert_c1c2, query_c1c2, no_vnodes, debug, since
+from tools import insert_c1c2, query_c1c2, no_vnodes, debug, since, new_node
 from assertions import assert_almost_equal
 
 import re
@@ -46,6 +46,66 @@ class TestTopology(Tester):
         node2.stop(wait_other_notice=True)
 
         time.sleep(10)
+
+    @since('3.2')
+    def forbid_intercluster_gossip_test(self):
+        """
+        @jira_ticket CASSANDRA-10111
+        In the event that a node is bootstrapped into cluster B with a broadcast_address of a node in
+        cluster A, nodes in cluster A should not add nodes in cluster B
+        """
+        cluster = self.cluster
+        cluster.populate(3)
+        [node1, node2, node3] = cluster.nodelist()
+
+        # We want to split the CCM nodes into two distinct C* clusters - A and B.
+        # We update seeds and cluster_name before updating configs on member nodes.
+        cluster._config_options['cluster_name'] = 'A'
+        cluster.seeds = [node1]
+        cluster._update_config()
+        node1.import_config_files()
+        node2.import_config_files()
+
+        cluster._config_options['cluster_name'] = 'B'
+        cluster.seeds = [node3]
+        cluster._update_config()
+        node3.import_config_files()
+
+        cluster.start(wait_for_binary_proto=True, wait_other_notice=False, no_wait=True)
+
+        # Show each node's status for debugging
+        self.show_status(node1)
+        self.show_status(node2)
+        self.show_status(node3)
+
+        cluster_a_describe_out, _ = node1.nodetool('describecluster')
+        cluster_b_describe_out, _ = node3.nodetool('describecluster')
+
+        debug(cluster_a_describe_out)
+        debug(cluster_b_describe_out)
+
+        # Confirm that we have successfully produced two distinct clusters
+        self.assertIn('Name: A', cluster_a_describe_out)
+        self.assertIn('Name: B', cluster_b_describe_out)
+
+        # Bootstrap node into B with broadcast_address set to address of node in A
+        node4 = new_node(cluster)
+        node4.set_configuration_options(values={'broadcast_address': node2.address()})
+        try:
+            node4.start()
+        except NodeError:
+            pass
+
+        node4.watch_log_for('Handshaking version with /' + node3.address(), timeout=60)
+
+        # Wait for gossip to propagate
+        time.sleep(2)
+
+        node1_status_out, _ = node1.nodetool('status')
+        debug(node1_status_out)
+
+        # Ensure that cluster A doesn't have metadata entries for nodes in cluster B
+        self.assertNotIn(node3.address(), node1_status_out)
 
     @no_vnodes()
     def movement_test(self):
