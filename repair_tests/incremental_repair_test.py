@@ -167,6 +167,7 @@ class TestIncRepair(Tester):
         * Verify repairs occurred and repairedAt was updated
         """
         cluster = self.cluster
+        cluster.set_configuration_options(values={'hinted_handoff_enabled': False})
         cluster.populate(2).start()
         node1, node2 = cluster.nodelist()
         node1.stress(['write', 'n=10K', '-schema', 'replication(factor=2)', '-rate', 'threads=50'])
@@ -207,6 +208,9 @@ class TestIncRepair(Tester):
             node1.repair()
         else:
             node1.nodetool("repair -par -inc")
+
+        # wait for any compactions to finish as a result of repair
+        node1.wait_for_compactions()
 
         with open('final.txt', 'w') as h:
             node1.run_sstablemetadata(output_file=h, keyspace='keyspace1')
