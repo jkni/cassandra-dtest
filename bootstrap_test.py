@@ -192,6 +192,51 @@ class TestBootstrap(Tester):
             debug(stdout)
             assert False, "Cannot read inserted data after bootstrap"
 
+    def retry_after_no_seeds_bootstrap_test(self):
+        """
+        Test that we can bootstrap after a failed bootstrap attempt in which we
+        could not gossip with seeds. This has failed before due to unflushed
+        state in SystemKeyspace.
+
+        @jira_ticket CASSANDRA-11742
+        """
+
+        cluster = self.cluster
+        cluster.populate(1).start(wait_other_notice=True)
+        node1 = cluster.nodelist()[0]
+
+        # Stop seed node
+        node1.stop()
+
+        # start bootstrapping node2 and
+        node2 = new_node(cluster)
+
+        try:
+            # we decrease ring relay so that we don't spend as long trying to find seeds
+            node2.start(wait_other_notice=False, jvm_args=['-Dcassandra.ring_delay_ms=4000'])
+        except NodeError:
+            pass  # node doesn't start as expected, don't care failure mode since we'll find in log
+
+        # wait for message that we cannot contact any seeds
+        node2.watch_log_for("Unable to gossip with any seeds", timeout=20)
+
+        # make sure node is stopped, we use this to spin on is_running
+        node2.stop()
+
+        # start both nodes
+        node1.start(wait_other_notice=False)
+        # we decrease ring delay to decrease startup time
+        node2.start(wait_other_notice=False, jvm_args=['-Dcassandra.ring_delay_ms=4000'])
+
+        # make sure we can accept connections
+        node2.watch_log_for("Starting listening for CQL clients", timeout=40)
+
+        session = self.patient_exclusive_cql_connection(node2)
+
+        # make sure we successfully bootstrapped on the second try
+        rows = list(session.execute("SELECT bootstrapped FROM system.local WHERE key='local'"))
+        self.assertEqual(rows[0][0], 'COMPLETED')
+
     @since('2.2')
     def bootstrap_with_reset_bootstrap_state_test(self):
         """Test bootstrap with resetting bootstrap progress"""
@@ -513,7 +558,7 @@ class TestBootstrap(Tester):
         node1.stress(['write', 'n=500K', '-schema', 'replication(factor=1)',
                       '-rate', 'threads=10'])
 
-        node2 = new_node(cluster)
+        node2 = new_node(cluster, bootstrap=True)
         node2.start(wait_other_notice=True)
 
         node3 = new_node(cluster, remote_debug_port='2003')
