@@ -208,6 +208,11 @@ class TestTopology(Tester):
         while start + 30 > time.time() and node3.is_running():
             time.sleep(1)
 
+        p = node3.jstack()
+        (out, err) = p.communicate()
+        debug(out)
+        debug(err)
+
         self.assertFalse(node3.is_running())
 
     @known_failure(failure_source='test',
