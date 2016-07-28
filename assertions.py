@@ -4,6 +4,7 @@ from cassandra import (InvalidRequest, ReadFailure,
                        ReadTimeout, Unauthorized, Unavailable, WriteFailure,
                        WriteTimeout)
 from cassandra.query import SimpleStatement
+from dtest import debug
 from time import sleep
 
 import tools
@@ -252,5 +253,10 @@ def assert_not_running(node):
     while node.is_running() and attempts < 10:
         sleep(1)
         attempts = attempts + 1
+
+    p = node.jstack()
+    (out, err) = p.communicate()
+    debug(out)
+    debug(err)
 
     assert_false(node.is_running())
