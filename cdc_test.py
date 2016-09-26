@@ -489,6 +489,40 @@ class TestCDC(Tester):
                 'id': uuid.uuid4()
             }
         )
+
+        non_cdc_table_info = TableInfo(
+            ks_name=ks_name, table_name='non_cdc_tab',
+            column_spec=_16_uuid_column_spec,
+            insert_stmt=_get_16_uuid_insert_stmt(ks_name, 'non_cdc_tab')
+        )
+        generation_session.execute(non_cdc_table_info.create_stmt)
+
+        non_cdc_prepared_insert = generation_session.prepare(non_cdc_table_info.insert_stmt)
+
+        # record segments that could have inserts to system tables generated
+        # during start up
+        potential_startup_segments = _get_commitlog_files(generation_node.get_path())
+
+        start, time_limit = time.time(), 60
+        rate_limited_debug = get_rate_limited_function(debug, 5)
+        debug('writing to non-cdc (non-system) table')
+
+        # We write until we get a new commitlog segment
+        while _get_commitlog_files(generation_node.get_path()) <= potential_startup_segments:
+            elapsed = time.time() - start
+            rate_limited_debug('  non-cdc load step has lasted {s:.2f}s'.format(s=elapsed))
+            self.assertLessEqual(
+                elapsed, time_limit,
+                "It's been over a {s}s and we haven't written a new "
+                "commitlog segment. Something is wrong.".format(s=time_limit)
+            )
+            execute_concurrent(
+                generation_session,
+                ((non_cdc_prepared_insert, ()) for _ in range(1000)),
+                concurrency=500,
+                raise_on_first_error=True,
+            )
+
         generation_session.execute(cdc_table_info.create_stmt)
 
         # insert 10000 rows
