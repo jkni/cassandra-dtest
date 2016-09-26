@@ -11,8 +11,15 @@ from dtest import (Tester, cleanup_cluster, create_ccm_cluster, debug,
                    get_test_path)
 from tools.decorators import known_failure
 from tools.files import replace_in_file, safe_mkdtemp
+from tools.funcutils import get_rate_limited_function
 from tools.misc import ImmutableMapping
 
+def _get_commitlog_files(node_path):
+        commitlog_dir = os.path.join(node_path, 'commitlogs')
+        return {
+            os.path.join(commitlog_dir, name)
+            for name in os.listdir(commitlog_dir)
+        }
 
 class SnapshotTester(Tester):
 
@@ -20,8 +27,8 @@ class SnapshotTester(Tester):
         self.create_ks(session, 'ks', 1)
         session.execute('CREATE TABLE ks.cf ( key int PRIMARY KEY, val text);')
 
-    def insert_rows(self, session, start, end):
-        insert_statement = session.prepare("INSERT INTO ks.cf (key, val) VALUES (?, 'asdf')")
+    def insert_rows(self, session, tablename, start, end):
+        insert_statement = session.prepare("INSERT INTO ks.{tn} (key, val) VALUES (?, 'asdf')".format(tn=tablename))
         args = [(r,) for r in range(start, end)]
         execute_concurrent_with_args(session, insert_statement, args, concurrency=20)
 
@@ -80,12 +87,12 @@ class TestSnapshot(SnapshotTester):
         session = self.patient_cql_connection(node1)
         self.create_schema(session)
 
-        self.insert_rows(session, 0, 100)
+        self.insert_rows(session, 'cf', 0, 100)
         snapshot_dir = self.make_snapshot(node1, 'ks', 'cf', 'basic')
 
         # Write more data after the snapshot, this will get thrown
         # away when we restore:
-        self.insert_rows(session, 100, 200)
+        self.insert_rows(session, 'cf', 100, 200)
         rows = session.execute('SELECT count(*) from ks.cf')
         self.assertEqual(rows[0][0], 200)
 
@@ -220,12 +227,29 @@ class TestArchiveCommitlog(SnapshotTester):
                             tmp_commitlog=tmp_commitlog, archive_command=archive_command))])
 
         cluster.start()
-
         session = self.patient_cql_connection(node1)
         self.create_ks(session, 'ks', 1)
+
+        existing_commitlogs = _get_commitlog_files(node1.get_path())
+        start, time_limit = time.time(), 600
+        rate_limited_debug = get_rate_limited_function(debug, 5)
+
+        session.execute('CREATE TABLE ks.junk_cf ( key bigint PRIMARY KEY, val text);')
+
+        # ensure we move on to a segment that doesn't contain startup mutations
+        while _get_commitlog_files(node1.get_path()) <= existing_commitlogs:
+            elapsed = time.time() - start
+            rate_limited_debug(' commitlog advancing step has lasted {s:.2f}s'.format(s=elapsed))
+            self.assertLessEqual(
+                elapsed, time_limit,
+                "It's been over a {s}s and we haven't written a new "
+                "commitlog segment. Something is wrong.".format(s=time_limit)
+            )
+            self.insert_rows(session, 'junk_cf', 0, 10000)
+
         session.execute('CREATE TABLE ks.cf ( key bigint PRIMARY KEY, val text);')
-        debug("Writing first 30,000 rows...")
-        self.insert_rows(session, 0, 30000)
+        debug("Writing first 60,000 rows...")
+        self.insert_rows(session, 'cf', 0, 60000)
         # Record when this first set of inserts finished:
         insert_cutoff_times = [time.gmtime()]
 
@@ -258,20 +282,20 @@ class TestArchiveCommitlog(SnapshotTester):
         try:
             # Write more data:
             debug("Writing second 30,000 rows...")
-            self.insert_rows(session, 30000, 60000)
+            self.insert_rows(session, 'cf', 60000, 90000)
             node1.flush()
             time.sleep(10)
             # Record when this second set of inserts finished:
             insert_cutoff_times.append(time.gmtime())
 
             debug("Writing final 5,000 rows...")
-            self.insert_rows(session, 60000, 65000)
+            self.insert_rows(session, 'cf', 90000, 95000)
             # Record when the third set of inserts finished:
             insert_cutoff_times.append(time.gmtime())
 
             rows = session.execute('SELECT count(*) from ks.cf')
             # Make sure we have the same amount of rows as when we snapshotted:
-            self.assertEqual(rows[0][0], 65000)
+            self.assertEqual(rows[0][0], 95000)
 
             # Check that there are at least one commit log backed up that
             # is not one of the active commit logs:
@@ -332,7 +356,7 @@ class TestArchiveCommitlog(SnapshotTester):
 
             rows = session.execute('SELECT count(*) from ks.cf')
             # Make sure we have the same amount of rows as when we snapshotted:
-            self.assertEqual(rows[0][0], 30000)
+            self.assertEqual(rows[0][0], 60000)
 
             # Edit commitlog_archiving.properties. Remove the archive
             # command  and set a restore command and restore_directories:
@@ -357,14 +381,14 @@ class TestArchiveCommitlog(SnapshotTester):
 
             session = self.patient_cql_connection(node1)
             rows = session.execute('SELECT count(*) from ks.cf')
-            # Now we should have 30000 rows from the snapshot + 30000 rows
+            # Now we should have 60000 rows from the snapshot + 30000 rows
             # from the commitlog backups:
             if not restore_archived_commitlog:
-                self.assertEqual(rows[0][0], 30000)
-            elif restore_point_in_time:
                 self.assertEqual(rows[0][0], 60000)
+            elif restore_point_in_time:
+                self.assertEqual(rows[0][0], 90000)
             else:
-                self.assertEqual(rows[0][0], 65000)
+                self.assertEqual(rows[0][0], 95000)
 
         finally:
             # clean up
@@ -418,7 +442,7 @@ class TestArchiveCommitlog(SnapshotTester):
         self.create_ks(session, 'ks', 1)
         session.execute('CREATE TABLE ks.cf ( key bigint PRIMARY KEY, val text);')
         debug("Writing 30,000 rows...")
-        self.insert_rows(session, 0, 60000)
+        self.insert_rows(session, 'cf', 0, 60000)
 
         try:
             # Check that there are at least one commit log backed up that
