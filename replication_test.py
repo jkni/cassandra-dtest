@@ -591,35 +591,9 @@ class SnitchConfigurationUpdateTest(Tester):
                                                   .format('GossipingPropertyFileSnitch')})
 
         node1 = cluster.nodelist()[0]
-
-        with open(os.path.join(node1.get_conf_dir(), 'cassandra-rackdc.properties'), 'w') as topo_file:
-            for line in ["dc={}".format(node1.data_center), "rack=rack1"]:
-                topo_file.write(line + os.linesep)
-
-        debug("Starting node {} with rack1".format(node1.address()))
-        node1.start(wait_for_binary_proto=True)
-
-        debug("Shutting down node {}".format(node1.address()))
-        node1.stop(wait_other_notice=True)
-
-        debug("Updating snitch file with rack2")
-        for node in cluster.nodelist():
-            with open(os.path.join(node.get_conf_dir(), 'cassandra-rackdc.properties'), 'w') as topo_file:
-                for line in ["dc={}".format(node.data_center), "rack=rack2"]:
-                    topo_file.write(line + os.linesep)
-
-        debug("Restarting node {} with rack2".format(node1.address()))
-        mark = node1.mark_log()
-        node1.start()
-
-        # check node not running
-        debug("Waiting for error message in log file")
-
-        if cluster.version() >= '2.2':
-            node1.watch_log_for("Cannot start node if snitch's rack(.*) differs from previous rack(.*)",
-                                from_mark=mark)
-        else:
-            node1.watch_log_for("Fatal exception during initialization", from_mark=mark)
+        for xi in range(0, 10000):
+            node1.start(wait_for_binary_proto=True)
+            node1.stop()
 
     def test_failed_snitch_update_gossiping_property_file_snitch(self):
         """
