@@ -592,6 +592,7 @@ class SnitchConfigurationUpdateTest(Tester):
 
         node1 = cluster.nodelist()[0]
         for xi in range(0, 10000):
+            print xi
             node1.start(wait_for_binary_proto=True)
             node1.stop()
 
