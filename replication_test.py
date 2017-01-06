@@ -591,8 +591,7 @@ class SnitchConfigurationUpdateTest(Tester):
                                                   .format('GossipingPropertyFileSnitch')})
 
         node1 = cluster.nodelist()[0]
-        for xi in range(0, 10000):
-            print xi
+        for xi in range(0, 500):
             node1.start(wait_for_binary_proto=True)
             node1.stop()
 
